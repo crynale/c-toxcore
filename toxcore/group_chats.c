@@ -3612,7 +3612,7 @@ static bool send_peer_key_rotation_request(const GC_Chat *chat, GC_Connection *g
     if (!gconn->self_is_closer) {
         // if this peer hasn't sent us a rotation request in a reasonable timeframe we drop their connection
         if (mono_time_is_timeout(chat->mono_time, gconn->last_key_rotation, GC_KEY_ROTATION_TIMEOUT + GC_PING_TIMEOUT)) {
-            gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_TIMEOUT, nullptr, 0);
+            //**// gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_TIMEOUT, nullptr, 0);
         }
 
         return true;
@@ -5065,7 +5065,7 @@ static int handle_gc_kick_peer(const GC_Session *c, GC_Chat *chat, const GC_Peer
             GC_Connection *gconn = get_gc_connection(chat, i);
             assert(gconn != nullptr);
 
-            gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_SELF_DISCONNECTED, nullptr, 0);
+            //**// gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_SELF_DISCONNECTED, nullptr, 0);
         }
 
         chat->connection_state = CS_DISCONNECTED;
@@ -6600,6 +6600,7 @@ static bool peer_delete(const GC_Session *c, GC_Chat *chat, uint32_t peer_number
     gcc_peer_cleanup(&peer->gconn);
 
     --chat->numpeers;
+    LOGGER_WARNING(chat->log, "chat->numpeers-- %d", chat->numpeers);
 
     if (chat->numpeers != peer_number) {
         chat->group[peer_number] = chat->group[chat->numpeers];
@@ -6715,6 +6716,7 @@ int peer_add(GC_Chat *chat, const IP_Port *ipp, const uint8_t *public_key)
     }
 
     ++chat->numpeers;
+    LOGGER_ERROR(chat->log, "chat->numpeers++ %d", chat->numpeers);
     chat->group = tmp_group;
 
     chat->group[peer_number] = (GC_Peer) {
@@ -6830,7 +6832,7 @@ static void do_peer_connections(const GC_Session *c, GC_Chat *chat, void *userda
         }
 
         if (peer_timed_out(chat->mono_time, gconn)) {
-            gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_TIMEOUT, nullptr, 0);
+            //**// gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_TIMEOUT, nullptr, 0);
             continue;
         }
 
@@ -7440,7 +7442,7 @@ static size_t load_gc_peers(GC_Chat *chat, const GC_SavedPeerInfo *addrs, uint16
                                    addrs[i].tcp_relay.public_key);
 
         if (add_tcp_result == -1 && !ip_port_is_set) {
-            gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_DISCONNECTED, nullptr, 0);
+            //**// gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_DISCONNECTED, nullptr, 0);
             continue;
         }
 
@@ -7448,7 +7450,7 @@ static size_t load_gc_peers(GC_Chat *chat, const GC_SavedPeerInfo *addrs, uint16
             const int save_tcp_result = gcc_save_tcp_relay(chat->rng, gconn, &addrs[i].tcp_relay);
 
             if (save_tcp_result == -1) {
-                gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_DISCONNECTED, nullptr, 0);
+                //**// gcc_mark_for_deletion(gconn, chat->tcp_conn, GC_EXIT_TYPE_DISCONNECTED, nullptr, 0);
                 continue;
             }
 
