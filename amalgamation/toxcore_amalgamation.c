@@ -10020,7 +10020,6 @@ uint32_t tox_group_peer_count(const Tox *tox, uint32_t group_number, Tox_Err_Gro
 uint32_t tox_group_offline_peer_count(const Tox *tox, uint32_t group_number, Tox_Err_Group_Peer_Query *error);
 
 void tox_group_get_peerlist(const Tox *tox, uint32_t group_number, uint32_t *peerlist, Tox_Err_Group_Peer_Query *error);
-void tox_group_get_offline_peerlist(const Tox *tox, uint32_t group_number, uint32_t *peerlist, Tox_Err_Group_Peer_Query *error);
 
 /**
  * Return the length of the peer's name. If the group number or ID is invalid, the
@@ -10107,6 +10106,9 @@ Tox_Connection tox_group_peer_get_connection_status(const Tox *tox, uint32_t gro
  * @return true on success.
  */
 bool tox_group_peer_get_public_key(const Tox *tox, uint32_t group_number, uint32_t peer_id, uint8_t *public_key,
+                                   Tox_Err_Group_Peer_Query *error);
+
+bool tox_group_savedpeer_get_public_key(const Tox *tox, uint32_t group_number, uint32_t slot_number, uint8_t *public_key,
                                    Tox_Err_Group_Peer_Query *error);
 
 /**
@@ -12950,6 +12952,9 @@ int64_t get_gc_peer_id_by_public_key(const GC_Chat *chat, const uint8_t *public_
 non_null(1) nullable(3)
 int gc_get_peer_public_key_by_peer_id(const GC_Chat *chat, uint32_t peer_id, uint8_t *public_key);
 
+non_null(1) nullable(3)
+int gc_get_savedpeer_public_key_by_slot_number(const GC_Chat *chat, uint32_t slot_number, uint8_t *public_key);
+
 /** @brief Gets the connection status for peer associated with `peer_id`.
  *
  * Returns 2 if we have a direct (UDP) connection with a peer.
@@ -13279,9 +13284,6 @@ uint32_t get_group_offline_peercount(const GC_Chat *chat);
 
 non_null()
 void copy_peerlist(const GC_Chat *chat, uint32_t *out_list);
-
-non_null()
-void copy_offline_peerlist(const GC_Chat *chat, uint32_t *out_list);
 
 /** @brief Returns true if peer_number exists */
 non_null()
@@ -17400,6 +17402,22 @@ typedef enum TOXAV_OPTIONS_OPTION {
  */
 bool toxav_option_set(ToxAV *av, uint32_t friend_number, TOXAV_OPTIONS_OPTION option, int32_t value,
                         TOXAV_ERR_OPTION_SET *error);
+
+
+/**
+ * NGC Group Video.
+ */
+void* toxav_ngc_video_init(const uint16_t v_bitrate, const uint16_t max_quantizer);
+void toxav_ngc_video_kill(void *vngc);
+bool toxav_ngc_video_encode(void *vngc, const uint16_t vbitrate, const uint32_t max_quantizer,
+                            const uint16_t width, const uint16_t height,
+                            const uint8_t *y, const uint8_t *u, const uint8_t *v,
+                            uint8_t *encoded_frame_bytes, uint32_t *encoded_frame_size_bytes);
+bool toxav_ngc_video_decode(void *vngc, uint8_t *encoded_frame_bytes, uint32_t encoded_frame_size_bytes,
+                            uint16_t width, uint16_t height,
+                            uint8_t *y, uint8_t *u, uint8_t *v,
+                            int32_t *ystride, int32_t *ustride, int32_t *vstride,
+                            uint8_t flush_decoder);
 
 
 #ifdef __cplusplus
@@ -32291,6 +32309,28 @@ int64_t get_gc_peer_id_by_public_key(const GC_Chat *chat, const uint8_t *public_
     return (chat->group[target_peer_number].peer_id);
 }
 
+int gc_get_savedpeer_public_key_by_slot_number(const GC_Chat *chat, uint32_t slot_number, uint8_t *public_key)
+{
+    if (((int)slot_number < 0) || (slot_number > GC_MAX_SAVED_PEERS))
+    {
+        return -1;
+    }
+
+    if (public_key == nullptr) {
+        return -1;
+    }
+
+    const GC_SavedPeerInfo *saved_peer = &chat->saved_peers[slot_number];
+    if (saved_peer_is_valid(saved_peer)) {
+        const int peernumber = get_peer_number_of_enc_pk(chat, saved_peer->public_key, true);
+        if (peernumber < 0) {
+            memcpy(public_key, saved_peer->public_key, ENC_PUBLIC_KEY_SIZE);
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int gc_get_peer_public_key_by_peer_id(const GC_Chat *chat, uint32_t peer_id, uint8_t *public_key)
 {
     const int peer_number = get_peer_number_of_peer_id(chat, peer_id);
@@ -37084,19 +37124,14 @@ uint32_t get_group_offline_peercount(const GC_Chat *chat)
         return 0;
     }
 
-    if (chat->numpeers == 0) {
-        return 0;
-    }
-
     uint32_t sum = 0;
-
-    for (uint32_t i = 0; i < chat->numpeers; ++i) {
-        const GC_Connection *gconn = get_gc_connection(chat, i);
-
-        assert(gconn != nullptr);
-
-        if (!gconn->confirmed) {
-            ++sum;
+    for (uint16_t i = 0; i < GC_MAX_SAVED_PEERS; ++i) {
+        const GC_SavedPeerInfo *saved_peer = &chat->saved_peers[i];
+        if (saved_peer_is_valid(saved_peer)) {
+            const int peernumber = get_peer_number_of_enc_pk(chat, saved_peer->public_key, true);
+            if (peernumber < 0) {
+                ++sum;
+            }
         }
     }
 
@@ -37125,34 +37160,6 @@ void copy_peerlist(const GC_Chat *chat, uint32_t *out_list)
         assert(gconn != nullptr);
 
         if (gconn->confirmed) {
-            out_list[index] = chat->group[i].peer_id;
-            ++index;
-        }
-    }
-}
-
-void copy_offline_peerlist(const GC_Chat *chat, uint32_t *out_list)
-{
-    if (out_list == nullptr) {
-        return;
-    }
-
-    if (chat == nullptr) {
-        return;
-    }
-
-    if (chat->numpeers == 0) {
-        return;
-    }
-
-    uint32_t index = 0;
-
-    for (uint32_t i = 0; i < chat->numpeers; ++i) {
-        const GC_Connection *gconn = get_gc_connection(chat, i);
-
-        assert(gconn != nullptr);
-
-        if (!gconn->confirmed) {
             out_list[index] = chat->group[i].peer_id;
             ++index;
         }
@@ -62695,32 +62702,6 @@ void tox_group_get_peerlist(const Tox *tox, uint32_t group_number, uint32_t *pee
     return;
 }
 
-void tox_group_get_offline_peerlist(const Tox *tox, uint32_t group_number, uint32_t *peerlist, Tox_Err_Group_Peer_Query *error)
-{
-    assert(tox != nullptr);
-
-    tox_lock(tox);
-    const GC_Chat *chat = gc_get_group(tox->m->group_handler, group_number);
-
-    if (chat == nullptr) {
-        SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_GROUP_NOT_FOUND);
-        tox_unlock(tox);
-        return;
-    }
-
-    if (peerlist == nullptr) {
-        SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_GROUP_NOT_FOUND);
-        tox_unlock(tox);
-        return;
-    }
-
-    copy_offline_peerlist(chat, peerlist);
-    tox_unlock(tox);
-
-    SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_OK);
-    return;
-}
-
 size_t tox_group_peer_get_name_size(const Tox *tox, uint32_t group_number, uint32_t peer_id,
                                     Tox_Err_Group_Peer_Query *error)
 {
@@ -62823,6 +62804,32 @@ Tox_Group_Role tox_group_peer_get_role(const Tox *tox, uint32_t group_number, ui
 
     SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_OK);
     return (Tox_Group_Role)ret;
+}
+
+bool tox_group_savedpeer_get_public_key(const Tox *tox, uint32_t group_number, uint32_t slot_number, uint8_t *public_key,
+                                   Tox_Err_Group_Peer_Query *error)
+{
+    assert(tox != nullptr);
+
+    tox_lock(tox);
+    const GC_Chat *chat = gc_get_group(tox->m->group_handler, group_number);
+
+    if (chat == nullptr) {
+        SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_GROUP_NOT_FOUND);
+        tox_unlock(tox);
+        return false;
+    }
+
+    const int ret = gc_get_savedpeer_public_key_by_slot_number(chat, slot_number, public_key);
+    tox_unlock(tox);
+
+    if (ret == -1) {
+        SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_PEER_NOT_FOUND);
+        return false;
+    }
+
+    SET_ERROR_PARAMETER(error, TOX_ERR_GROUP_PEER_QUERY_OK);
+    return true;
 }
 
 bool tox_group_peer_get_public_key(const Tox *tox, uint32_t group_number, uint32_t peer_id, uint8_t *public_key,
@@ -76496,6 +76503,15 @@ bool toxav_video_send_frame_age(ToxAV *av, uint32_t friend_number, uint16_t widt
 
     pthread_mutex_lock(call->toxav_call_mutex);
     // HINT: auto switch encoder, if we got capabilities packet from friend ------
+    if (call->video->video_encoder_coded_used != TOXAV_ENCODER_CODEC_USED_H264) {
+        const uint64_t friend_caps = tox_friend_get_capabilities(av->tox, friend_number);
+        LOGGER_API_DEBUG(av->tox, "-------> CCCCCC:%ld", (long)friend_caps);
+        if ((friend_caps & TOX_CAPABILITY_TOXAV_H264) != 0) {
+            LOGGER_API_DEBUG(av->tox, "-------> HHH___: * set *");
+            call->video->h264_video_capabilities_received = 1;
+        }
+    }
+
     if ((call->video->h264_video_capabilities_received == 1)
             &&
             (call->video->video_encoder_coded_used != TOXAV_ENCODER_CODEC_USED_H264)) {
@@ -76818,6 +76834,15 @@ bool toxav_video_send_frame_h264_age(ToxAV *av, uint32_t friend_number, uint16_t
     int16_t force_reinit_encoder = -1;
 
     // HINT: auto switch encoder, if we got capabilities packet from friend ------
+    if (call->video->video_encoder_coded_used != TOXAV_ENCODER_CODEC_USED_H264) {
+        const uint64_t friend_caps = tox_friend_get_capabilities(av->tox, friend_number);
+        LOGGER_API_DEBUG(av->tox, "-------> CCCCCC:%ld", (long)friend_caps);
+        if ((friend_caps & TOX_CAPABILITY_TOXAV_H264) != 0) {
+            LOGGER_API_DEBUG(av->tox, "-------> HHH___: * set *");
+            call->video->h264_video_capabilities_received = 1;
+        }
+    }
+
     if ((call->video->h264_video_capabilities_received == 1)
             &&
             (call->video->video_encoder_coded_used != TOXAV_ENCODER_CODEC_USED_H264)) {
@@ -77636,6 +77661,537 @@ Mono_Time *toxav_get_av_mono_time(ToxAV *toxav)
 
     return toxav->toxav_mono_time;
 }
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+// for H264 ----------
+#include <libavutil/opt.h>
+// for H264 ----------
+#ifdef __cplusplus
+}
+#endif
+
+#define NGC__H264_DECODER_THREADS 4
+#define NGC__H264_DECODER_THREAD_FRAME_ACTIVE 1
+#define NGC__X264_ENCODER_THREADS 4
+#define NGC__X264_ENCODER_SLICES 4
+#define NGC__VIDEO_F_RATE_TOLERANCE_H264 1.3
+#define NGC__VIDEO_BUF_FACTOR_H264 1
+#define NGC__VIDEO_MAX_KF_H264 30 // index frame every x frames, sadly also SPS and PPS gets sent only every x frames :-(
+
+struct ToxAV_NGC_vcoders {
+    x264_picture_t ngc__h264_in_pic;
+    x264_picture_t ngc__h264_out_pic;
+    x264_t *ngc__h264_encoder;
+    uint32_t ngc__v_encoder_bitrate;
+    uint32_t ngc__v_encoder_max_quantizer;
+    uint16_t ngc__v_width;
+    uint16_t ngc__v_height;
+    AVCodecContext *ngc__h264_decoder;
+};
+
+static void toxav_ngc_video_init_encoder_only(struct ToxAV_NGC_vcoders *ngc_video_coders,
+            const uint16_t v_bitrate, const uint16_t max_quantizer)
+{
+    // ENCODER -------
+    x264_param_t param;
+    if (x264_param_default_preset(&param, "ultrafast", "zerolatency,fastdecode") < 0) {
+        // log warning
+    }
+
+    //if (x264_param_default_preset(&param, "superfast", "zerolatency,fastdecode") < 0) {
+    //    // log warning
+    //}
+
+    /* Configure non-default params */
+    param.i_csp = X264_CSP_I420;
+    param.i_width  = 480; // 240;
+    param.i_height = 640; // 320;
+
+    param.i_threads = NGC__X264_ENCODER_THREADS;
+    param.b_sliced_threads = true;
+    param.i_slice_count = NGC__X264_ENCODER_SLICES;
+
+    param.b_deterministic = false;
+    param.b_intra_refresh = 16;
+    param.rc.i_lookahead = 0;
+    param.i_bframe = 0;
+    param.i_keyint_max = NGC__VIDEO_MAX_KF_H264;
+    param.b_vfr_input = 1; /* VFR input.  If 1, use timebase and timestamps for ratecontrol purposes.
+                            * If 0, use fps only. */
+    param.i_timebase_num = 1;       // 1 ms = timebase units = (1/1000)s
+    param.i_timebase_den = 1000;   // 1 ms = timebase units = (1/1000)s
+    param.b_repeat_headers = 1;
+    param.b_annexb = 1;
+
+    uint16_t NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 = v_bitrate;
+    if ((v_bitrate < 90) || (v_bitrate > 2000))
+    {
+        NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 = 200;
+    }
+
+    param.rc.f_rate_tolerance = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264;
+    param.rc.i_vbv_buffer_size = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 * NGC__VIDEO_BUF_FACTOR_H264;
+    param.rc.i_vbv_max_bitrate = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 * 1;
+
+    // max quantizer for x264
+    if ((max_quantizer < 20) || (max_quantizer > 51))
+    {
+        param.rc.i_qp_max = 49;
+    }
+    else
+    {
+        param.rc.i_qp_max = max_quantizer;
+    }
+
+    if (param.rc.i_qp_max == 51) {
+        param.rc.i_qp_min = 45;
+    } else {
+        param.rc.i_qp_min = 3;
+    }
+
+    ngc_video_coders->ngc__v_encoder_max_quantizer = param.rc.i_qp_max;
+    ngc_video_coders->ngc__v_encoder_bitrate = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264;
+
+    param.rc.b_stat_read = 0;
+    param.rc.b_stat_write = 0;
+
+    param.i_log_level = X264_LOG_ERROR; // X264_LOG_ERROR; // X264_LOG_NONE;
+
+    if (x264_param_apply_profile(&param, "baseline") < 0) { // "baseline", "main", "high", "high10", "high422", "high444"
+        // log warning
+    }
+
+    //if (x264_param_apply_profile(&param, "high") < 0) {
+        // log warning
+    //}
+
+    if (x264_picture_alloc(&(ngc_video_coders->ngc__h264_in_pic), param.i_csp, param.i_width, param.i_height) < 0) {
+        // log error
+    }
+
+    // vc->h264_in_pic.img.plane[0] --> Y
+    // vc->h264_in_pic.img.plane[1] --> U
+    // vc->h264_in_pic.img.plane[2] --> V
+
+    ngc_video_coders->ngc__h264_encoder = x264_encoder_open(&param);
+
+    // ENCODER -------
+}
+
+void* toxav_ngc_video_init(const uint16_t v_bitrate, const uint16_t max_quantizer)
+{
+    struct ToxAV_NGC_vcoders *ngc_video_coders = calloc(1, sizeof(struct ToxAV_NGC_vcoders));
+
+    // ENCODER -------
+    x264_param_t param;
+    if (x264_param_default_preset(&param, "ultrafast", "zerolatency,fastdecode") < 0) {
+        // log warning
+    }
+
+    //if (x264_param_default_preset(&param, "superfast", "zerolatency,fastdecode") < 0) {
+    //    // log warning
+    //}
+
+    /* Configure non-default params */
+    param.i_csp = X264_CSP_I420;
+    param.i_width  = 480; // 240;
+    param.i_height = 640; // 320;
+
+    ngc_video_coders->ngc__v_width = param.i_width;
+    ngc_video_coders->ngc__v_height = param.i_height;
+
+    param.i_threads = NGC__X264_ENCODER_THREADS;
+    param.b_sliced_threads = true;
+    param.i_slice_count = NGC__X264_ENCODER_SLICES;
+
+    param.b_deterministic = false;
+    param.b_intra_refresh = 16;
+    param.rc.i_lookahead = 0;
+    param.i_bframe = 0;
+    param.i_keyint_max = NGC__VIDEO_MAX_KF_H264;
+    param.b_vfr_input = 1; /* VFR input.  If 1, use timebase and timestamps for ratecontrol purposes.
+                            * If 0, use fps only. */
+    param.i_timebase_num = 1;       // 1 ms = timebase units = (1/1000)s
+    param.i_timebase_den = 1000;   // 1 ms = timebase units = (1/1000)s
+    param.b_repeat_headers = 1;
+    param.b_annexb = 1;
+
+    uint16_t NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 = v_bitrate;
+    if ((v_bitrate < 90) || (v_bitrate > 2000))
+    {
+        NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 = 200;
+    }
+
+    param.rc.f_rate_tolerance = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264;
+    param.rc.i_vbv_buffer_size = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 * NGC__VIDEO_BUF_FACTOR_H264;
+    param.rc.i_vbv_max_bitrate = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264 * 1;
+
+    // max quantizer for x264
+    if ((max_quantizer < 20) || (max_quantizer > 51))
+    {
+        param.rc.i_qp_max = 49;
+    }
+    else
+    {
+        param.rc.i_qp_max = max_quantizer;
+    }
+
+    if (param.rc.i_qp_max == 51) {
+        param.rc.i_qp_min = 45;
+    } else {
+        param.rc.i_qp_min = 3;
+    }
+
+    ngc_video_coders->ngc__v_encoder_max_quantizer = param.rc.i_qp_max;
+    ngc_video_coders->ngc__v_encoder_bitrate = NGC__VIDEO_BITRATE_INITIAL_VALUE_H264;
+
+    param.rc.b_stat_read = 0;
+    param.rc.b_stat_write = 0;
+
+    param.i_log_level = X264_LOG_ERROR; // X264_LOG_ERROR; // X264_LOG_NONE;
+
+    if (x264_param_apply_profile(&param, "baseline") < 0) { // "baseline", "main", "high", "high10", "high422", "high444"
+        // log warning
+    }
+
+    //if (x264_param_apply_profile(&param, "high") < 0) {
+        // log warning
+    //}
+
+    if (x264_picture_alloc(&(ngc_video_coders->ngc__h264_in_pic), param.i_csp, param.i_width, param.i_height) < 0) {
+        // log error
+    }
+
+    // vc->h264_in_pic.img.plane[0] --> Y
+    // vc->h264_in_pic.img.plane[1] --> U
+    // vc->h264_in_pic.img.plane[2] --> V
+
+    ngc_video_coders->ngc__h264_encoder = x264_encoder_open(&param);
+
+    // ENCODER -------
+
+
+
+
+    // DECODER -------
+
+    const AVCodec *codec = NULL;
+    ngc_video_coders->ngc__h264_decoder = NULL;
+
+// https://github.com/FFmpeg/FFmpeg/blob/70d25268c21cbee5f08304da95be1f647c630c15/doc/APIchanges#L86
+// Deprecate use of av_register_all()
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
+    avcodec_register_all();
+#endif
+
+    codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+
+    if (!codec) {
+        // log error: codec not found H264 on decoder
+    }
+
+    ngc_video_coders->ngc__h264_decoder = avcodec_alloc_context3(codec);
+
+#if LIBAVCODEC_VERSION_MAJOR < 60
+    if (codec->capabilities & AV_CODEC_CAP_TRUNCATED) {
+        ngc_video_coders->ngc__h264_decoder->flags |= AV_CODEC_FLAG_TRUNCATED; /* we do not send complete frames */
+    }
+#endif
+    if (codec->capabilities & AV_CODEC_FLAG_LOW_DELAY) {
+        ngc_video_coders->ngc__h264_decoder->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    }
+
+#ifdef AV_CODEC_FLAG2_SHOW_ALL
+    ngc_video_coders->ngc__h264_decoder->flags |= AV_CODEC_FLAG2_SHOW_ALL;
+#endif
+
+    if (NGC__H264_DECODER_THREADS > 0) {
+        if (codec->capabilities & AV_CODEC_CAP_SLICE_THREADS) {
+            ngc_video_coders->ngc__h264_decoder->thread_count = NGC__H264_DECODER_THREADS;
+            ngc_video_coders->ngc__h264_decoder->thread_type = FF_THREAD_SLICE;
+            ngc_video_coders->ngc__h264_decoder->active_thread_type = FF_THREAD_SLICE;
+        }
+
+        if (NGC__H264_DECODER_THREAD_FRAME_ACTIVE == 1) {
+            if (codec->capabilities & AV_CODEC_CAP_FRAME_THREADS) {
+                ngc_video_coders->ngc__h264_decoder->thread_count = NGC__H264_DECODER_THREADS;
+                ngc_video_coders->ngc__h264_decoder->thread_type |= FF_THREAD_FRAME;
+                ngc_video_coders->ngc__h264_decoder->active_thread_type |= FF_THREAD_FRAME;
+            }
+        }
+    }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 0)
+    ngc_video_coders->ngc__h264_decoder->refcounted_frames = 0;
+#endif
+    /*   When AVCodecContext.refcounted_frames is set to 0, the returned
+    *             reference belongs to the decoder and is valid only until the
+    *             next call to this function or until closing or flushing the
+    *             decoder. The caller may not write to it.
+    */
+#pragma GCC diagnostic pop
+
+
+    ngc_video_coders->ngc__h264_decoder->delay = 0;
+#define NGC__AV_OPT_SEARCH_CHILDREN   (1 << 0)
+    av_opt_set_int(ngc_video_coders->ngc__h264_decoder->priv_data, "delay", 0, NGC__AV_OPT_SEARCH_CHILDREN);
+
+    ngc_video_coders->ngc__h264_decoder->time_base = (AVRational) {
+        1, 15
+    };
+    ngc_video_coders->ngc__h264_decoder->framerate = (AVRational) {
+        15, 1
+    };
+
+    if (avcodec_open2(ngc_video_coders->ngc__h264_decoder, codec, NULL) < 0) {
+        // log error: could not open codec H264 on decoder
+    }
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 0, 0)
+    ngc_video_coders->ngc__h264_decoder->refcounted_frames = 0;
+#endif
+#pragma GCC diagnostic pop
+    /*   When AVCodecContext.refcounted_frames is set to 0, the returned
+    *             reference belongs to the decoder and is valid only until the
+    *             next call to this function or until closing or flushing the
+    *             decoder. The caller may not write to it.
+    */
+
+    // DECODER -------
+
+    return (void*)ngc_video_coders;
+}
+
+static void toxav_ngc_video_reconfigure_encoder(struct ToxAV_NGC_vcoders *ngc_video_coders)
+{
+    if (ngc_video_coders->ngc__h264_encoder) {
+#if 0
+        x264_param_t param;
+        x264_encoder_parameters(ngc_video_coders->ngc__h264_encoder, &param);
+        param.rc.f_rate_tolerance = NGC__VIDEO_F_RATE_TOLERANCE_H264;
+        param.rc.i_vbv_buffer_size = ngc_video_coders->ngc__v_encoder_bitrate * NGC__VIDEO_BUF_FACTOR_H264;
+        param.rc.i_vbv_max_bitrate = ngc_video_coders->ngc__v_encoder_bitrate * 1;
+        int res = x264_encoder_reconfig(ngc_video_coders->ngc__h264_encoder, &param);
+#else
+        x264_encoder_close(ngc_video_coders->ngc__h264_encoder);
+        x264_picture_clean(&(ngc_video_coders->ngc__h264_in_pic));
+        ngc_video_coders->ngc__h264_encoder = nullptr;
+
+        toxav_ngc_video_init_encoder_only(ngc_video_coders,
+                ngc_video_coders->ngc__v_encoder_bitrate,
+                ngc_video_coders->ngc__v_encoder_max_quantizer);
+#endif
+    }
+}
+
+void toxav_ngc_video_kill(void *vngc)
+{
+    struct ToxAV_NGC_vcoders *ngc_video_coders = (struct ToxAV_NGC_vcoders*)vngc;
+    // encoder
+    if (ngc_video_coders->ngc__h264_encoder) {
+        x264_encoder_close(ngc_video_coders->ngc__h264_encoder);
+        x264_picture_clean(&(ngc_video_coders->ngc__h264_in_pic));
+    }
+    // decoder
+    if (ngc_video_coders->ngc__h264_decoder->extradata) {
+        av_free(ngc_video_coders->ngc__h264_decoder->extradata);
+        ngc_video_coders->ngc__h264_decoder->extradata = NULL;
+    }
+    avcodec_free_context(&ngc_video_coders->ngc__h264_decoder);
+    free(ngc_video_coders);
+}
+
+bool toxav_ngc_video_encode(void *vngc, const uint16_t vbitrate, const uint32_t max_quantizer,
+                            const uint16_t width, const uint16_t height,
+                            const uint8_t *y, const uint8_t *u, const uint8_t *v,
+                            uint8_t *encoded_frame_bytes, uint32_t *encoded_frame_size_bytes)
+{
+    if ((vngc == nullptr) || (encoded_frame_size_bytes == nullptr)) {
+        return false;
+    }
+
+    struct ToxAV_NGC_vcoders *ngc_video_coders = (struct ToxAV_NGC_vcoders*)vngc;
+
+    bool need_reconfigure_encoder = false;
+    if (ngc_video_coders->ngc__v_encoder_bitrate != vbitrate)
+    {
+        if ((vbitrate < 90) || (vbitrate > 2000))
+        {
+            ngc_video_coders->ngc__v_encoder_bitrate = 200;
+        }
+        else
+        {
+            ngc_video_coders->ngc__v_encoder_bitrate = vbitrate;
+        }
+        need_reconfigure_encoder = true;
+    }
+
+    if (ngc_video_coders->ngc__v_encoder_max_quantizer != max_quantizer)
+    {
+        if ((max_quantizer < 20) || (max_quantizer > 51))
+        {
+            ngc_video_coders->ngc__v_encoder_max_quantizer = 49;
+        }
+        else
+        {
+            ngc_video_coders->ngc__v_encoder_max_quantizer = max_quantizer;
+        }
+        need_reconfigure_encoder = true;
+    }
+
+    if (need_reconfigure_encoder) {
+        toxav_ngc_video_reconfigure_encoder(ngc_video_coders);
+    }
+
+
+    memcpy(ngc_video_coders->ngc__h264_in_pic.img.plane[0], y, width * height);
+    memcpy(ngc_video_coders->ngc__h264_in_pic.img.plane[1], u, (width / 2) * (height / 2));
+    memcpy(ngc_video_coders->ngc__h264_in_pic.img.plane[2], v, (width / 2) * (height / 2));
+
+    ngc_video_coders->ngc__h264_in_pic.i_type = X264_TYPE_AUTO;
+
+    x264_nal_t *nal = nullptr;
+    int i_nal;
+    int i_frame_size = x264_encoder_encode(ngc_video_coders->ngc__h264_encoder,
+                                        &nal,
+                                        &i_nal,
+                                        &(ngc_video_coders->ngc__h264_in_pic),
+                                        &(ngc_video_coders->ngc__h264_out_pic));
+
+    if (i_frame_size < 0) {
+        return false;
+    } else if (i_frame_size == 0) {
+        return false;
+    }
+    if (nal == NULL) {
+        return false;
+    }
+    if (nal->p_payload == nullptr) {
+        return false;
+    }
+
+    if (i_frame_size > 36989) {
+        // log error: encoded frame does not fit in NGC custom packet
+        return false;
+    }
+
+    *encoded_frame_size_bytes = i_frame_size;
+    memcpy(encoded_frame_bytes, (const uint8_t *)(nal->p_payload), i_frame_size);
+    return true;
+}
+
+static void toxav_ngc_video_flush_decoder(struct ToxAV_NGC_vcoders *ngc_video_coders)
+{
+    if (ngc_video_coders->ngc__h264_decoder) {
+        // Receive and discard frames
+        AVFrame *frame = av_frame_alloc();
+        if (frame != nullptr) {
+            while (avcodec_receive_frame(ngc_video_coders->ngc__h264_decoder, frame) == 0) {
+                av_frame_unref(frame);
+            }
+            av_frame_free(&frame);
+        }
+    }
+}
+
+bool toxav_ngc_video_decode(void *vngc, uint8_t *encoded_frame_bytes, uint32_t encoded_frame_size_bytes,
+                            uint16_t width, uint16_t height,
+                            uint8_t *y, uint8_t *u, uint8_t *v,
+                            int32_t *ystride, int32_t *ustride, int32_t *vstride,
+                            uint8_t flush_decoder)
+{
+    if (vngc == nullptr) {
+        return false;
+    }
+
+    struct ToxAV_NGC_vcoders *ngc_video_coders = (struct ToxAV_NGC_vcoders*)vngc;
+
+    if ((y == nullptr) || (u == nullptr) || (v == nullptr)) {
+        return false;
+    }
+    if ((ystride == nullptr) || (ustride == nullptr) || (vstride == nullptr)) {
+        return false;
+    }
+    if (encoded_frame_bytes == nullptr) {
+        return false;
+    }
+    if (encoded_frame_size_bytes < 1) {
+        return false;
+    }
+
+    // flush decoder
+    if (flush_decoder == 1) {
+        toxav_ngc_video_flush_decoder(ngc_video_coders);
+    }
+
+    AVPacket *compr_data = av_packet_alloc();
+    if (compr_data == NULL) {
+        return false;
+    }
+
+    compr_data->data = encoded_frame_bytes;
+    compr_data->size = (int)encoded_frame_size_bytes; // hmm, "int" again
+
+    int result_send_packet = avcodec_send_packet(ngc_video_coders->ngc__h264_decoder, compr_data);
+    if (result_send_packet != 0) {
+        av_packet_free(&compr_data);
+        // printf("EEEE:007:res=%d (%d) (%d) (%d) (%d)\n", result_send_packet, AVERROR(EAGAIN), AVERROR_EOF, AVERROR(EINVAL), AVERROR(ENOMEM));
+        return false;
+    }
+
+    int ret_ = 0;
+    int result = false;
+    while (ret_ >= 0) {
+        AVFrame *frame = av_frame_alloc();
+        if (frame == NULL) {
+            break;
+        }
+        ret_ = avcodec_receive_frame(ngc_video_coders->ngc__h264_decoder, frame);
+        if (ret_ == AVERROR(EAGAIN) || ret_ == AVERROR_EOF) {
+            av_frame_free(&frame);
+            break;
+        } else if (ret_ < 0) {
+            av_frame_free(&frame);
+            break;
+        } else if (ret_ == 0) {
+            if ((frame->data[0] != NULL) && (frame->data[1] != NULL) && (frame->data[2] != NULL)) {
+                // ------ GOT a VIDEO FRAME ------
+                if ((width < frame->linesize[0]) || (height != frame->height)) {
+                    // log error: video frame stride and height do no match input buffer stride and height
+                    av_frame_free(&frame);
+                    continue;
+                } else {
+                    *ystride = frame->linesize[0];
+                    *ustride = frame->linesize[1];
+                    *vstride = frame->linesize[2];
+                    memcpy(y, (const uint8_t *)frame->data[0], frame->height * frame->linesize[0]);
+                    memcpy(u, (const uint8_t *)frame->data[1], (frame->height / 2) * frame->linesize[1]);
+                    memcpy(v, (const uint8_t *)frame->data[2], (frame->height / 2) * frame->linesize[2]);
+                    result = true;
+                    av_frame_free(&frame);
+                    continue;
+                }
+                // ------ GOT a VIDEO FRAME ------
+            } else {
+                // log error: no frame data
+            }
+        } else {
+            // log error: some other error
+        }
+        av_frame_free(&frame);
+    }
+    av_packet_free(&compr_data);
+
+    return result;
+}
+
 /* SPDX-License-Identifier: GPL-3.0-or-later
  * Copyright © 2016-2018 The TokTok team.
  * Copyright © 2013-2015 Tox project.
@@ -79350,9 +79906,6 @@ extern "C" {
 }
 #endif
 
-int global_h264_enc_profile_high_enabled = 0;
-int global_h264_enc_profile_high_enabled_switch = 0;
-
 // HINT: cant get the loglevel enum here for some reason. so here is the workaround.
 #ifndef LOGGER_LEVEL_TRACE
 #define LOGGER_LEVEL_TRACE 0
@@ -79822,7 +80375,7 @@ VCSession *vc_new_h264(Logger *log, ToxAV *av, uint32_t friend_number, toxav_vid
         x264_param_t param;
 
         // -- set inital value for H264 encoder profile --
-        global_h264_enc_profile_high_enabled = H264_ENCODER_STARTWITH_PROFILE_HIGH;
+        int global_h264_enc_profile_high_enabled = H264_ENCODER_STARTWITH_PROFILE_HIGH;
         // -- set inital value for H264 encoder profile --
 
         // "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"
@@ -79956,7 +80509,7 @@ VCSession *vc_new_h264(Logger *log, ToxAV *av, uint32_t friend_number, toxav_vid
         vc->h264_out_pic2 = av_packet_alloc();
 
         // -- set inital value for H264 encoder profile --
-        global_h264_enc_profile_high_enabled = H264_ENCODER_STARTWITH_PROFILE_HIGH;
+        int global_h264_enc_profile_high_enabled = H264_ENCODER_STARTWITH_PROFILE_HIGH;
         // -- set inital value for H264 encoder profile --
 
         if (global_h264_enc_profile_high_enabled == 1) {
@@ -80280,12 +80833,6 @@ int vc_reconfigure_encoder_h264(Logger *log, VCSession *vc, uint32_t bit_rate,
         return -1;
     }
 
-    if (global_h264_enc_profile_high_enabled_switch == 1) {
-        global_h264_enc_profile_high_enabled_switch = 0;
-        kf_max_dist = -2;
-        // LOGGER_WARNING(log, "switching H264 encoder profile ...");
-    }
-
     if ((vc->h264_enc_width == width) &&
             (vc->h264_enc_height == height) &&
             (vc->video_rc_max_quantizer == vc->video_rc_max_quantizer_prev) &&
@@ -80341,6 +80888,7 @@ int vc_reconfigure_encoder_h264(Logger *log, VCSession *vc, uint32_t bit_rate,
 
                     x264_param_t param;
 
+                    int global_h264_enc_profile_high_enabled = H264_ENCODER_STARTWITH_PROFILE_HIGH;
                     if (global_h264_enc_profile_high_enabled == 1) {
                         if (x264_param_default_preset(&param, "superfast", "zerolatency,fastdecode") < 0) {
                             // goto fail;
@@ -80480,6 +81028,7 @@ int vc_reconfigure_encoder_h264(Logger *log, VCSession *vc, uint32_t bit_rate,
 
                 vc->h264_encoder2 = avcodec_alloc_context3(codec2);
 
+                int global_h264_enc_profile_high_enabled = H264_ENCODER_STARTWITH_PROFILE_HIGH;
                 if (global_h264_enc_profile_high_enabled == 1) {
                     av_opt_set(vc->h264_encoder2->priv_data, "profile", "high", 0);
                     vc->h264_encoder2->profile               = FF_PROFILE_H264_HIGH; // FF_PROFILE_H264_HIGH;

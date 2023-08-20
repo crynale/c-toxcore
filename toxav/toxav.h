@@ -1030,6 +1030,22 @@ bool toxav_option_set(ToxAV *av, uint32_t friend_number, TOXAV_OPTIONS_OPTION op
                         TOXAV_ERR_OPTION_SET *error);
 
 
+/**
+ * NGC Group Video.
+ */
+void* toxav_ngc_video_init(const uint16_t v_bitrate, const uint16_t max_quantizer);
+void toxav_ngc_video_kill(void *vngc);
+bool toxav_ngc_video_encode(void *vngc, const uint16_t vbitrate, const uint32_t max_quantizer,
+                            const uint16_t width, const uint16_t height,
+                            const uint8_t *y, const uint8_t *u, const uint8_t *v,
+                            uint8_t *encoded_frame_bytes, uint32_t *encoded_frame_size_bytes);
+bool toxav_ngc_video_decode(void *vngc, uint8_t *encoded_frame_bytes, uint32_t encoded_frame_size_bytes,
+                            uint16_t width, uint16_t height,
+                            uint8_t *y, uint8_t *u, uint8_t *v,
+                            int32_t *ystride, int32_t *ustride, int32_t *vstride,
+                            uint8_t flush_decoder);
+
+
 #ifdef __cplusplus
 }
 #endif
